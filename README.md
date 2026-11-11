@@ -7,6 +7,7 @@ merchant's configuration, runs them, investigates failures, and writes a readine
 **中文简介：** 一个帮支付平台 FDE 完成新商户接入的 Agent。Claude 读取支付 API 规范，针对商户配置生成并运行集成测试，排查失败原因，最后输出《上线就绪报告》。Agent 只能通过 MCP server 访问沙箱。
 
 > Why this exists: see the [customer scenario](docs/scenario.md).
+> What a run looks like: see the [example run on DeepSeek](docs/example-run.md).
 
 ## Status
 
@@ -15,9 +16,9 @@ merchant's configuration, runs them, investigates failures, and writes a readine
 | Mock payment API with per-merchant config | Done, tested |
 | 10 seeded bugs, each switchable | Done, tested |
 | MCP server (6 tools) | Done, tested end to end over stdio |
-| Test agent (Claude or DeepSeek) | Written; tool loop tested against a scripted stand-in model. **Not yet run against a real model** (needs an API key) |
+| Test agent (Claude or DeepSeek) | Working. One real run on DeepSeek: found the seeded bug; [see the example run](docs/example-run.md) |
 | Docker Compose | Written, **not yet verified** |
-| Eval harness (recall / false positives) | [Built and self-tested](evals/README.md). **No model run yet, so no score** |
+| Eval harness (recall / false positives) | [Built and self-tested](evals/README.md). One pilot case run; **full 15-case baseline not run yet** |
 
 ## Architecture
 
@@ -143,6 +144,7 @@ src/onboarding/agent/          the agent, with one backend per model provider
 tests/                         rule checks, seeded-bug tests, MCP end-to-end test
 evals/                         eval cases, grader, runner, answer key
 docs/scenario.md               the customer scenario
+docs/example-run.md            a real run, step by step, with its grading
 ```
 
 ## Roadmap

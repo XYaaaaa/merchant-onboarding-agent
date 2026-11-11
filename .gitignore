@@ -11,3 +11,5 @@ evals/runs/*/traces/
 evals/runs/report.html
 evals/runs/state.json
 evals/runs/trajectory/
+# ...except the published pilot run, kept as a worked example
+!evals/runs/pilot-1-before-fixes/traces/

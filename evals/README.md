@@ -91,6 +91,7 @@ never scored as agent failures). A stopped run resumes where it left off.
 ## Pilot run: what one case taught us
 
 One case (`single-B08`, DeepSeek `deepseek-v4-pro`), kept in `runs/pilot-1-before-fixes/`.
+Step-by-step walkthrough: [docs/example-run.md](../docs/example-run.md).
 It is a single run, so it says nothing about the agent's overall accuracy. It did show three problems:
 
 | What happened | Cause | Fix |
