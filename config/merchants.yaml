@@ -1,0 +1,32 @@
+# Per-merchant (tenant) configuration for the sandbox payment platform.
+# All secrets here are fake sandbox values.
+merchants:
+  acme_utilities:
+    name: Acme Utilities
+    status: active
+    payment_methods: [card, bank_transfer]
+    currencies: [USD]
+    max_amount: 500000          # minor units ($5,000.00)
+    refund_allowed: true
+    callback_url: http://localhost:8000/sink/acme_utilities
+    webhook_secret: whsec_sandbox_acme_123
+
+  nova_telecom:
+    name: Nova Telecom
+    status: active
+    payment_methods: [card, wallet]
+    currencies: [USD, EUR]
+    max_amount: 100000          # minor units ($1,000.00)
+    refund_allowed: false
+    callback_url: http://localhost:8000/sink/nova_telecom
+    webhook_secret: whsec_sandbox_nova_456
+
+  old_gym:
+    name: Old Gym (suspended)
+    status: suspended
+    payment_methods: [card]
+    currencies: [USD]
+    max_amount: 20000
+    refund_allowed: true
+    callback_url: http://localhost:8000/sink/old_gym
+    webhook_secret: whsec_sandbox_gym_789

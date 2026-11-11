@@ -1,0 +1,28 @@
+# docker compose up api                       -> sandbox API on http://localhost:8000/docs
+# docker compose run --rm agent               -> run the test agent (needs ANTHROPIC_API_KEY)
+# SEEDED_BUGS=B02,B08 docker compose up api   -> switch on seeded bugs for the eval
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      SEEDED_BUGS: ${SEEDED_BUGS:-}
+      WEBHOOK_HTTP_DELIVERY: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      retries: 10
+
+  # Agent-generated tests run inside this container, not on your machine.
+  agent:
+    build: .
+    profiles: ["agent"]
+    depends_on:
+      api: {condition: service_healthy}
+    environment:
+      PAYMENT_API_URL: http://api:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENT_MODEL: ${AGENT_MODEL:-claude-opus-5-5}
+    volumes: ["./reports:/app/reports"]
+    entrypoint: ["python", "-m", "onboarding.agent.run"]
+    command: ["--merchant", "acme_utilities"]
