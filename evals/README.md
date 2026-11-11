@@ -70,7 +70,8 @@ It pushes three stand-in agents through the real grader and checks the scores:
 a perfect one (must get 15/15 and 19/19), an empty one (0/19), and a noisy one
 (every wrong finding must be counted).
 
-Try one case first, then the full set (needs `ANTHROPIC_API_KEY`; costs tokens):
+Try one case first, then the full set. Needs `DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`
+(DeepSeek is used when its key is set); costs tokens:
 
 ```bash
 uv run python evals/run_eval.py --cases single-B08 --yes
@@ -80,8 +81,8 @@ uv run python evals/run_eval.py --cases single-B08 --yes
 uv run python evals/run_eval.py --yes
 ```
 
-Useful flags: `--reps 3` (stability), `--model`, `--concurrency`, `--variant v1`
-(keep a changed prompt's results next to `baseline`).
+Useful flags: `--reps 3` (stability), `--provider`, `--model`, `--concurrency`, `--variant v1`
+(keep a changed prompt's or another model's results next to `baseline`).
 
 Results land in `evals/runs/<variant>/`: `results.jsonl` (one row per case run),
 `traces/` (full transcripts), `errors.jsonl` (runs that failed to execute; these are

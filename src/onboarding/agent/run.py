@@ -5,6 +5,9 @@ runs them, investigates failures, files each confirmed defect with a
 regression test, and writes a go-live readiness report.
 Every action goes through the MCP server; the agent has no other access.
 
+The model provider is picked from the environment: DeepSeek when
+DEEPSEEK_API_KEY is set, otherwise Claude (ANTHROPIC_API_KEY).
+
 Usage:
     python -m onboarding.agent.run --merchant acme_utilities
     python -m onboarding.agent.run --dry-run        # check the MCP wiring, no model call
@@ -22,12 +25,27 @@ from datetime import datetime
 from pathlib import Path
 
 import anthropic
-from anthropic import AsyncAnthropic
-from anthropic.lib.tools.mcp import async_mcp_tool
+import openai
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "claude-opus-5-5")
+from . import anthropic_backend, deepseek_backend
+
+BACKENDS = {"anthropic": anthropic_backend, "deepseek": deepseek_backend}
+
+
+def default_provider() -> str:
+    """DeepSeek when its key is set, otherwise Claude. AGENT_PROVIDER overrides both."""
+    chosen = os.environ.get("AGENT_PROVIDER")
+    if chosen:
+        if chosen not in BACKENDS:
+            raise SystemExit(f"AGENT_PROVIDER must be one of {sorted(BACKENDS)}")
+        return chosen
+    return "deepseek" if os.environ.get("DEEPSEEK_API_KEY") else "anthropic"
+
+
+def default_model(provider: str) -> str:
+    return os.environ.get("AGENT_MODEL") or BACKENDS[provider].DEFAULT_MODEL
 
 SYSTEM = """\
 You are working with a forward deployed engineer at a payment platform. A merchant is being \
@@ -57,6 +75,10 @@ the request sequence that reproduces it.
 3. Coverage: each rule id, and whether it passed, failed, or was not tested.
 4. Open questions for the merchant or the platform team, if any.
 """
+
+
+class MissingCredentials(Exception):
+    pass
 
 
 @dataclass
@@ -95,59 +117,32 @@ async def run_agent(
     merchant: str,
     api_url: str,
     findings_dir: Path,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_iterations: int = 40,
     on_tool_call=None,
+    provider: str | None = None,
 ) -> AgentResult:
     """Run the agent once for one merchant. Filed findings are written to findings_dir."""
     started = time.monotonic()
+    provider = provider or default_provider()
+    if provider == "deepseek" and not os.environ.get("DEEPSEEK_API_KEY"):
+        raise MissingCredentials("DEEPSEEK_API_KEY is not set.")
+    model = model or default_model(provider)
     user_prompt = f"Merchant to onboard: {merchant}. Test it and write the report."
     trace: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user_prompt}]
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-    tool_calls = 0
 
     async with stdio_client(server_params(api_url, findings_dir)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             mcp_tools = (await session.list_tools()).tools
-            recorder = _RecordingSession(session, trace)
-
-            client = AsyncAnthropic()
-            runner = client.beta.messages.tool_runner(
-                model=model,
-                max_tokens=16000,
-                thinking={"type": "adaptive"},
-                output_config={"effort": "high"},
-                # The conversation grows every turn; cache the shared prefix.
-                cache_control={"type": "ephemeral"},
-                # If the model declines a request, the API retries it on a fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-                system=SYSTEM,
-                tools=[async_mcp_tool(t, recorder) for t in mcp_tools],
-                max_iterations=max_iterations,
-                messages=[{"role": "user", "content": user_prompt}],
+            report, stop_reason, served_model, tool_calls = await BACKENDS[provider].drive(
+                model=model, system=SYSTEM, user_prompt=user_prompt, mcp_tools=mcp_tools,
+                session=_RecordingSession(session, trace), max_iterations=max_iterations,
+                trace=trace, usage=usage, on_tool_call=on_tool_call,
             )
 
-            last = None
-            async for message in runner:
-                last = message
-                for key in usage:
-                    usage[key] += getattr(message.usage, key, None) or 0
-                for block in message.content:
-                    if block.type == "text" and block.text.strip():
-                        trace.append({"role": "assistant", "content": block.text})
-                    elif block.type == "tool_use":
-                        tool_calls += 1
-                        trace.append({"role": "tool_call", "name": block.name,
-                                      "content": json.dumps(block.input, indent=2, ensure_ascii=False)})
-                        if on_tool_call:
-                            on_tool_call(block.name, block.input)
-
-    if last is None:
-        raise RuntimeError("The model returned no message")
-    report = "\n".join(b.text for b in last.content if b.type == "text").strip()
-    return AgentResult(report=report, stop_reason=last.stop_reason, model=last.model, usage=usage,
+    return AgentResult(report=report, stop_reason=stop_reason, model=served_model, usage=usage,
                        tool_calls=tool_calls, latency_s=round(time.monotonic() - started, 1), trace=trace)
 
 
@@ -176,7 +171,9 @@ async def run_cli(args: argparse.Namespace) -> int:
         detail = tool_input.get("path") or tool_input.get("title") or tool_input.get("merchant_id") or ""
         print(f"  -> {name} {detail}".rstrip())
 
-    result = await run_agent(args.merchant, args.api_url, findings_dir, args.model, args.max_iterations, show)
+    provider = args.provider or default_provider()
+    print(f"Provider: {provider}, model: {args.model or default_model(provider)}")
+    result = await run_agent(args.merchant, args.api_url, findings_dir, args.model, args.max_iterations, show, provider)
     if result.stop_reason == "refusal":
         print("The model declined this request.", file=sys.stderr)
         return 1
@@ -205,7 +202,9 @@ def leaf_exception(group: BaseException) -> BaseException:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--merchant", default="acme_utilities")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--provider", choices=sorted(BACKENDS),
+                        help="Default: deepseek if DEEPSEEK_API_KEY is set, else anthropic")
+    parser.add_argument("--model", help="Default: the provider's default model")
     parser.add_argument("--api-url", default=os.environ.get("PAYMENT_API_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--max-iterations", type=int, default=40)
     parser.add_argument("--out", type=Path, default=Path("reports"))
@@ -216,6 +215,12 @@ def main() -> None:
     try:
         code = asyncio.run(run_cli(args))
     # The MCP session runs in task groups, so API errors arrive wrapped in an ExceptionGroup.
+    except* MissingCredentials as group:
+        error = str(leaf_exception(group))
+    except* openai.AuthenticationError:
+        error = "DeepSeek rejected the API key. Check DEEPSEEK_API_KEY and try again."
+    except* openai.APIError as group:
+        error = f"DeepSeek API error: {leaf_exception(group)}"
     except* anthropic.AuthenticationError:
         error = "No valid Anthropic credentials. Set ANTHROPIC_API_KEY and try again."
     except* anthropic.RateLimitError:
@@ -230,7 +235,7 @@ def main() -> None:
         # The SDK raises TypeError when no credentials can be found at all.
         if "authentication" not in str(leaf_exception(group)):
             raise
-        error = "No Anthropic credentials found. Set ANTHROPIC_API_KEY and try again."
+        error = "No model credentials found. Set DEEPSEEK_API_KEY or ANTHROPIC_API_KEY and try again."
     sys.exit(error or code)
 
 

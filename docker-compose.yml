@@ -1,5 +1,5 @@
 # docker compose up api                       -> sandbox API on http://localhost:8000/docs
-# docker compose run --rm agent               -> run the test agent (needs ANTHROPIC_API_KEY)
+# docker compose run --rm agent               -> run the test agent (needs DEEPSEEK_API_KEY or ANTHROPIC_API_KEY)
 # SEEDED_BUGS=B02,B08 docker compose up api   -> switch on seeded bugs for the eval
 services:
   api:
@@ -21,8 +21,9 @@ services:
       api: {condition: service_healthy}
     environment:
       PAYMENT_API_URL: http://api:8000
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      AGENT_MODEL: ${AGENT_MODEL:-claude-opus-5-5}
+      AGENT_MODEL: ${AGENT_MODEL:-}
     volumes: ["./reports:/app/reports"]
     entrypoint: ["python", "-m", "onboarding.agent.run"]
     command: ["--merchant", "acme_utilities"]

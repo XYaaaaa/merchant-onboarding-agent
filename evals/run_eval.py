@@ -30,13 +30,15 @@ import time
 from pathlib import Path
 
 import anthropic
+import openai
 import uvicorn
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import oracle  # noqa: E402
-from onboarding.agent.run import DEFAULT_MODEL, AgentResult, leaf_exception, run_agent  # noqa: E402
+from onboarding.agent import run as agent_run  # noqa: E402
+from onboarding.agent.run import AgentResult, leaf_exception, run_agent  # noqa: E402
 from onboarding.api.app import create_app  # noqa: E402
 
 EVALS = Path(__file__).parent
@@ -176,7 +178,7 @@ def stub_agent(kind: str, case: dict) -> tuple[AgentResult, list[dict]]:
     return AgentResult(report, "end_turn", f"stub-{kind}", {"input_tokens": 0, "output_tokens": 0}, 0, 0.0, trace), findings
 
 
-async def run_case(case: dict, agent: str, model: str, timeout_s: int, max_iterations: int):
+async def run_case(case: dict, agent: str, model: str, timeout_s: int, max_iterations: int, provider: str):
     if agent != "claude":
         return stub_agent(agent, case)
     findings_dir = Path(tempfile.mkdtemp(prefix="eval-findings-"))
@@ -184,7 +186,8 @@ async def run_case(case: dict, agent: str, model: str, timeout_s: int, max_itera
         async with Sandbox(case["bugs"]) as sandbox:
             # Hard ceiling on the whole case, however lively the connection looks.
             result = await asyncio.wait_for(
-                run_agent(case["merchant"], sandbox.url, findings_dir, model, max_iterations), timeout_s)
+                run_agent(case["merchant"], sandbox.url, findings_dir, model, max_iterations, provider=provider),
+                timeout_s)
         return result, read_findings(findings_dir)
     finally:
         shutil.rmtree(findings_dir, ignore_errors=True)
@@ -218,10 +221,12 @@ async def run_all(args, out: Path) -> list[dict]:
         async with semaphore:
             started = time.monotonic()
             try:
-                result, findings = await run_case(case, args.agent, args.model, args.timeout_s, args.max_iterations)
+                result, findings = await run_case(case, args.agent, args.model, args.timeout_s, args.max_iterations,
+                                                  args.provider)
                 if args.agent == "claude":
                     # A silently substituted model would make the numbers meaningless.
-                    if not result.model.startswith(args.model):
+                    # (DeepSeek serves aliases under other names, so only Claude ids are checked.)
+                    if args.provider == "anthropic" and not result.model.startswith(args.model):
                         raise RuntimeError(f"served model {result.model!r} is not the requested {args.model!r}")
                     if not result.usage.get("output_tokens"):
                         raise RuntimeError("response carried no token usage")
@@ -230,7 +235,8 @@ async def run_all(args, out: Path) -> list[dict]:
                 if isinstance(group, (KeyboardInterrupt, asyncio.CancelledError)):
                     raise
                 exc = leaf_exception(group)
-                if isinstance(exc, anthropic.AuthenticationError) or (
+                if isinstance(exc, (anthropic.AuthenticationError, openai.AuthenticationError,
+                                    agent_run.MissingCredentials)) or (
                         isinstance(exc, TypeError) and "authentication" in str(exc)):
                     # Every case would fail the same way; stop instead of logging 15 errors.
                     raise MissingCredentials() from None
@@ -330,7 +336,7 @@ async def selftest() -> int:
     failed = False
     for kind, want in expected.items():
         with tempfile.TemporaryDirectory(prefix="eval-selftest-") as tmp:
-            args = argparse.Namespace(cases=None, reps=1, concurrency=4, agent=kind, model=kind,
+            args = argparse.Namespace(cases=None, reps=1, concurrency=4, agent=kind, model=kind, provider=None,
                                       timeout_s=60, max_iterations=1)
             print(f"\n[{kind}]")
             summary = summarize(await run_all(args, Path(tmp)))
@@ -346,7 +352,9 @@ async def selftest() -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--variant", default="baseline", help="'baseline' or v1, v2, ... (a folder under evals/runs/)")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--provider", choices=sorted(agent_run.BACKENDS),
+                        help="Default: deepseek if DEEPSEEK_API_KEY is set, else anthropic")
+    parser.add_argument("--model", help="Default: the provider's default model")
     parser.add_argument("--reps", type=int, default=1, help="Runs per case; use 3 to measure stability")
     parser.add_argument("--cases", nargs="*", help="Only these case ids")
     parser.add_argument("--concurrency", type=int, default=3)
@@ -360,22 +368,26 @@ def main() -> None:
 
     if args.selftest:
         sys.exit(asyncio.run(selftest()))
+    args.provider = args.provider or agent_run.default_provider()
+    args.model = args.model or agent_run.default_model(args.provider)
     if not re.fullmatch(r"baseline|v\d+", args.variant):
         sys.exit("--variant must be 'baseline' or v1, v2, ...")
 
     cases = load_cases(args.cases)
     if args.agent == "claude" and not args.yes:
-        sys.exit(f"This will run {len(cases)} cases x {args.reps} rep(s) on {args.model}, each a full agent "
+        sys.exit(f"This will run {len(cases)} cases x {args.reps} rep(s) on {args.provider} / {args.model}, each a full agent "
                  f"session. It calls the model and costs tokens. Re-run with --yes to start.")
     if args.agent != "claude" and args.variant == "baseline":
         sys.exit("Stub agents must not write into 'baseline'. Use --selftest, or pass another --variant.")
 
     out = FLOW / args.variant
-    print(f"{len(cases)} cases x {args.reps} rep(s), agent: {args.agent}, model: {args.model} -> {out}")
+    print(f"{len(cases)} cases x {args.reps} rep(s), agent: {args.agent}, provider: {args.provider}, "
+          f"model: {args.model} -> {out}")
     try:
         rows = asyncio.run(run_all(args, out))
     except MissingCredentials:
-        sys.exit("No valid Anthropic credentials. Set ANTHROPIC_API_KEY and try again. Nothing was scored.")
+        sys.exit(f"No valid credentials for {args.provider}. Set DEEPSEEK_API_KEY or ANTHROPIC_API_KEY "
+                 "and try again. Nothing was scored.")
     errors_path = out / "errors.jsonl"
     errors = len(errors_path.read_text().splitlines()) if errors_path.exists() else 0
     print_summary(summarize(rows), errors)
