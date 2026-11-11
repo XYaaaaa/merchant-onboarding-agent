@@ -1,0 +1,14 @@
+{
+  "metrics": [
+    {"id": "case_pass", "label": "Case pass", "kind": "binary"},
+    {"id": "recall", "label": "Bugs found", "kind": "float", "scale": 1},
+    {"id": "false_pos", "label": "False positives", "kind": "float", "scale": 5, "better": "lower"},
+    {"id": "verdict_ok", "label": "Verdict right", "kind": "binary"}
+  ],
+  "perf_fields": [
+    {"id": "latency_s", "label": "Time", "unit": "s"},
+    {"id": "tool_calls", "label": "Tool calls"},
+    {"id": "in_tokens", "label": "Tokens in"},
+    {"id": "out_tokens", "label": "Tokens out"}
+  ]
+}

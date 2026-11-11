@@ -37,13 +37,13 @@ def api_url():
     thread.join(timeout=5)
 
 
-def call_tools(api_url, calls):
+def call_tools(api_url, calls, findings_dir):
     """Open an MCP session and run [(tool, args), ...]; returns parsed results."""
     async def _run():
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "onboarding.mcp_server.server"],
-            env={**os.environ, "PAYMENT_API_URL": api_url},
+            env={**os.environ, "PAYMENT_API_URL": api_url, "FINDINGS_DIR": str(findings_dir)},
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -71,7 +71,7 @@ def test_refunds_disabled_for_nova():
 '''
 
 
-def test_mcp_tools_end_to_end(api_url):
+def test_mcp_tools_end_to_end(api_url, tmp_path):
     names, results = call_tools(api_url, [
         ("get_api_spec", {}),
         ("get_merchant_config", {"merchant_id": "nova_telecom"}),
@@ -80,10 +80,13 @@ def test_mcp_tools_end_to_end(api_url):
                          "body": {"amount": 1200, "currency": "USD", "payment_method": "card", "payer_ref": "tok_x"}}),
         ("api_request", {"method": "GET", "path": "http://evil.example/x"}),
         ("run_pytest", {"test_code": GENERATED_TEST}),
-    ])
-    assert names == {"get_api_spec", "list_merchants", "get_merchant_config", "api_request", "run_pytest"}
+        ("submit_finding", {"rule_id": "R8", "title": "Refund allowed for nova", "test_code": GENERATED_TEST}),
+        ("submit_finding", {"rule_id": "R1", "title": "Not a defect", "test_code": "def test_ok():\n    assert True\n"}),
+    ], findings_dir=tmp_path)
+    assert names == {"get_api_spec", "list_merchants", "get_merchant_config", "api_request", "run_pytest",
+                     "submit_finding"}
 
-    spec, config, created, bad_path, pytest_run = results
+    spec, config, created, bad_path, pytest_run, filed, rejected = results
     assert "R8 Refunds" in json.loads(spec[1])["info"]["description"]
     assert json.loads(config[1])["refund_allowed"] is False
     assert json.loads(created[1])["status"] == 201
@@ -91,3 +94,9 @@ def test_mcp_tools_end_to_end(api_url):
 
     run = json.loads(pytest_run[1])
     assert run["passed"] is False and "assert 201 == 403" in run["output"]  # seeded bug B08 caught
+
+    # A finding is filed only when its test really fails on the sandbox.
+    assert json.loads(filed[1])["accepted"] is True
+    assert json.loads(rejected[1])["accepted"] is False
+    stored = [json.loads(p.read_text()) for p in tmp_path.glob("finding_*.json")]
+    assert [f["rule_id"] for f in stored] == ["R8"]

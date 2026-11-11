@@ -6,6 +6,7 @@ Tools:
   get_merchant_config  - one merchant's sandbox configuration
   api_request          - call the sandbox API as a merchant
   run_pytest           - run a pytest file against the sandbox
+  submit_finding       - file a confirmed defect with a regression test
 
 Run: python -m onboarding.mcp_server.server   (stdio transport)
 """
@@ -27,6 +28,7 @@ from onboarding.api.config import load_merchants
 API_URL = os.environ.get("PAYMENT_API_URL", "http://127.0.0.1:8000").rstrip("/")
 PYTEST_TIMEOUT_S = int(os.environ.get("PYTEST_TIMEOUT_S", "120"))
 MAX_OUTPUT_CHARS = 12_000
+FINDINGS_DIR = Path(os.environ.get("FINDINGS_DIR", "reports/findings"))
 
 mcp = MCPServer("payment-sandbox")
 
@@ -92,6 +94,26 @@ def api_request(
     return {"status": response.status_code, "body": payload}
 
 
+def _execute_pytest(test_code: str) -> tuple[int | None, str]:
+    """Run test_code in a fresh temp dir. Returns (pytest exit code or None on timeout, output)."""
+    with tempfile.TemporaryDirectory(prefix="agent-tests-") as tmp:
+        (Path(tmp) / "test_generated.py").write_text(test_code)
+        # Generated code never needs model credentials.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+        env["PAYMENT_API_URL"] = API_URL
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", "test_generated.py"],
+                cwd=tmp, env=env, capture_output=True, text=True, timeout=PYTEST_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"Timed out after {PYTEST_TIMEOUT_S}s"
+    output = (proc.stdout + proc.stderr).strip()
+    if len(output) > MAX_OUTPUT_CHARS:
+        output = output[:2000] + "\n...[middle truncated]...\n" + output[-(MAX_OUTPUT_CHARS - 2000):]
+    return proc.returncode, output
+
+
 @mcp.tool()
 def run_pytest(test_code: str) -> dict:
     """Run a pytest file against the sandbox and return the result.
@@ -104,21 +126,38 @@ def run_pytest(test_code: str) -> dict:
     Args:
         test_code: Full contents of a Python test file.
     """
-    with tempfile.TemporaryDirectory(prefix="agent-tests-") as tmp:
-        (Path(tmp) / "test_generated.py").write_text(test_code)
-        env = {**os.environ, "PAYMENT_API_URL": API_URL}
-        env.pop("ANTHROPIC_API_KEY", None)  # generated code never needs it
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", "test_generated.py"],
-                cwd=tmp, env=env, capture_output=True, text=True, timeout=PYTEST_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired:
-            return {"exit_code": None, "passed": False, "output": f"Timed out after {PYTEST_TIMEOUT_S}s"}
-    output = (proc.stdout + proc.stderr).strip()
-    if len(output) > MAX_OUTPUT_CHARS:
-        output = output[:2000] + "\n...[middle truncated]...\n" + output[-(MAX_OUTPUT_CHARS - 2000):]
-    return {"exit_code": proc.returncode, "passed": proc.returncode == 0, "output": output}
+    exit_code, output = _execute_pytest(test_code)
+    return {"exit_code": exit_code, "passed": exit_code == 0, "output": output}
+
+
+@mcp.tool()
+def submit_finding(rule_id: str, title: str, test_code: str) -> dict:
+    """File one confirmed platform defect, with a regression test that proves it.
+
+    The test is the evidence. It must be a self-contained pytest file that PASSES
+    on an API that follows the spec and FAILS on this defect, so assert the
+    behaviour the spec requires. It will be re-run later against a fresh sandbox,
+    so it must create all the data it needs and use fresh idempotency keys.
+    Cover one defect per finding, with the smallest test that shows it.
+
+    The test is run now. The finding is rejected if the test does not fail
+    with an assertion (it passes, or it cannot be collected).
+
+    Args:
+        rule_id: The business rule that is broken, e.g. "R8".
+        title: One line saying what is wrong.
+        test_code: Full contents of the pytest file.
+    """
+    exit_code, output = _execute_pytest(test_code)
+    if exit_code != 1:  # pytest: 0 = all passed, 1 = tests failed, anything else = could not run
+        reason = ("The test passes on the sandbox, so it does not demonstrate a defect."
+                  if exit_code == 0 else "The test could not be run cleanly (collection error or timeout).")
+        return {"accepted": False, "reason": reason, "output": output}
+    FINDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    number = len(list(FINDINGS_DIR.glob("finding_*.json"))) + 1
+    path = FINDINGS_DIR / f"finding_{number:02d}.json"
+    path.write_text(json.dumps({"rule_id": rule_id, "title": title, "test_code": test_code}, indent=2))
+    return {"accepted": True, "finding_id": path.stem}
 
 
 def main() -> None:

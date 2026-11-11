@@ -14,10 +14,10 @@ merchant's configuration, runs them, investigates failures, and writes a readine
 |---|---|
 | Mock payment API with per-merchant config | Done, tested |
 | 10 seeded bugs, each switchable | Done, tested |
-| MCP server (5 tools) | Done, tested end to end over stdio |
+| MCP server (6 tools) | Done, tested end to end over stdio |
 | Test agent | Written; wiring verified with `--dry-run`. **Not yet run against the model** (needs an API key) |
 | Docker Compose | Written, **not yet verified** |
-| Eval harness (recall / false positives) | [Designed](evals/README.md), not built |
+| Eval harness (recall / false positives) | [Built and self-tested](evals/README.md). **No model run yet, so no score** |
 
 ## Architecture
 
@@ -59,7 +59,7 @@ Needs Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-uv run pytest                    # 26 tests
+uv run pytest                    # 30 tests
 ```
 
 Start the sandbox (interactive docs at http://127.0.0.1:8000/docs):
@@ -80,12 +80,21 @@ Run the agent (needs `ANTHROPIC_API_KEY`; this calls the model and costs tokens)
 uv run python -m onboarding.agent.run --merchant nova_telecom
 ```
 
-The report is printed and saved under `reports/`.
+The report is printed and saved under `reports/`. Each defect is also filed with a regression test.
 
 To give the agent something to find, start the sandbox with seeded bugs:
 
 ```bash
 SEEDED_BUGS=B02,B08 uv run uvicorn onboarding.api.app:app_factory --factory --port 8000
+```
+
+### Eval
+
+How many seeded bugs does the agent find, and how often is it wrong? Findings are graded by
+replaying their regression tests on clean and buggy builds. Details: [evals/README.md](evals/README.md).
+
+```bash
+uv run python evals/run_eval.py --selftest
 ```
 
 ### With Docker
@@ -104,6 +113,7 @@ docker compose run --rm agent --merchant nova_telecom
 | `get_merchant_config` | One merchant's sandbox configuration |
 | `api_request` | One HTTP call to the sandbox, as a given merchant |
 | `run_pytest` | Run a generated pytest file against the sandbox |
+| `submit_finding` | File a confirmed defect with a regression test; rejected unless the test really fails |
 
 ## Safety choices
 
@@ -121,12 +131,12 @@ src/onboarding/api/            mock payment API + seeded bugs
 src/onboarding/mcp_server/     MCP server
 src/onboarding/agent/          the agent
 tests/                         rule checks, seeded-bug tests, MCP end-to-end test
-evals/                         eval design and answer key
+evals/                         eval cases, grader, runner, answer key
 docs/scenario.md               the customer scenario
 ```
 
 ## Roadmap
 
-1. **Eval harness** — run the agent per seeded bug; report recall, false positives, stability, cost
+1. **First eval run** — get the baseline numbers, then tune the prompt against them
 2. **Requirements → config** — turn a merchant's messy requirements doc into a config draft, and flag gaps
 3. **Log diagnosis** — when a test fails, read service logs to find the root cause

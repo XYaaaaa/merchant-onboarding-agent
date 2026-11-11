@@ -1,0 +1,23 @@
+# Eval cases. Each case = one merchant to onboard + the seeded bugs switched on.
+# The agent is told only the merchant. `bugs` is the hidden ground truth.
+cases:
+  # --- one bug each (10) ---
+  - {id: single-B01, merchant: nova_telecom,   bugs: [B01]}
+  - {id: single-B02, merchant: acme_utilities, bugs: [B02]}   # needs a merchant with refunds on
+  - {id: single-B03, merchant: nova_telecom,   bugs: [B03]}
+  - {id: single-B04, merchant: acme_utilities, bugs: [B04]}
+  - {id: single-B05, merchant: nova_telecom,   bugs: [B05]}
+  - {id: single-B06, merchant: acme_utilities, bugs: [B06]}
+  - {id: single-B07, merchant: nova_telecom,   bugs: [B07]}
+  - {id: single-B08, merchant: nova_telecom,   bugs: [B08]}   # needs a merchant with refunds off
+  - {id: single-B09, merchant: acme_utilities, bugs: [B09]}
+  - {id: single-B10, merchant: acme_utilities, bugs: [B10]}
+
+  # --- three bugs at once (3) ---
+  - {id: multi-1, merchant: nova_telecom,   bugs: [B01, B05, B08]}
+  - {id: multi-2, merchant: acme_utilities, bugs: [B02, B04, B07]}
+  - {id: multi-3, merchant: acme_utilities, bugs: [B03, B06, B10]}
+
+  # --- no bugs: anything reported here is a false alarm (2) ---
+  - {id: clean-acme, merchant: acme_utilities, bugs: []}
+  - {id: clean-nova, merchant: nova_telecom,   bugs: []}

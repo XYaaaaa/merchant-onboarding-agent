@@ -1,7 +1,8 @@
 """Merchant onboarding test agent.
 
 Claude reads the payment API spec, writes pytest tests for one merchant,
-runs them, investigates failures, and writes a go-live readiness report.
+runs them, investigates failures, files each confirmed defect with a
+regression test, and writes a go-live readiness report.
 Every action goes through the MCP server; the agent has no other access.
 
 Usage:
@@ -12,8 +13,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -40,37 +44,73 @@ values (limits, replays, wrong states), and run them with run_pytest.
 - A failing test is only a lead. Before reporting it, reproduce it with api_request and decide \
 whether the API broke a rule or your test was wrong. Fix wrong tests and rerun.
 - The sandbox keeps state between runs, so use fresh idempotency keys each time.
+- File every confirmed defect with submit_finding, one defect per finding. Its regression test is \
+what the platform team will run to verify the fix, and it is re-run on a fresh sandbox, so it must \
+pass on a correct API and fail only because of that defect. A defect that is not filed does not count.
 - Only report a defect you have reproduced. If a rule could not be tested, say so.
 
-Finish with a Markdown report for the merchant's go-live review:
-1. Verdict: READY or NOT READY, in one line, with the main reason.
-2. Findings: one entry per defect, with the rule id, what was expected, what happened, and the \
-exact request sequence that reproduces it.
+Finish with a Markdown report for the merchant's go-live review. Start it with a line that is \
+exactly "Verdict: READY" or "Verdict: NOT READY", then:
+1. The main reason for the verdict, in one or two sentences.
+2. Findings: one entry per filed defect, with the rule id, what was expected, what happened, and \
+the request sequence that reproduces it.
 3. Coverage: each rule id, and whether it passed, failed, or was not tested.
 4. Open questions for the merchant or the platform team, if any.
 """
 
 
-def server_params(api_url: str) -> StdioServerParameters:
+@dataclass
+class AgentResult:
+    report: str
+    stop_reason: str | None
+    model: str
+    usage: dict[str, int]
+    tool_calls: int
+    latency_s: float
+    trace: list[dict] = field(default_factory=list)
+
+
+class _RecordingSession:
+    """Wraps the MCP session so every tool result lands in the trace."""
+
+    def __init__(self, session: ClientSession, trace: list[dict]):
+        self._session, self._trace = session, trace
+
+    async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
+        result = await self._session.call_tool(name=name, arguments=arguments, **kwargs)
+        text = "\n".join(getattr(c, "text", "") for c in result.content)
+        self._trace.append({"role": "tool_result", "content": text})
+        return result
+
+
+def server_params(api_url: str, findings_dir: Path) -> StdioServerParameters:
     # The MCP server (and the tests it runs) never needs the model API key.
     env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
     env["PAYMENT_API_URL"] = api_url
+    env["FINDINGS_DIR"] = str(findings_dir)
     return StdioServerParameters(command=sys.executable, args=["-m", "onboarding.mcp_server.server"], env=env)
 
 
-async def run(merchant: str, model: str, api_url: str, max_iterations: int, out_dir: Path, dry_run: bool) -> int:
-    async with stdio_client(server_params(api_url)) as (read, write):
-        async with ClientSession(read, write) as mcp_client:
-            await mcp_client.initialize()
-            mcp_tools = (await mcp_client.list_tools()).tools
-            print(f"MCP tools: {', '.join(t.name for t in mcp_tools)}")
-            if dry_run:
-                health = await mcp_client.call_tool("api_request", {"method": "GET", "path": "/health"})
-                if health.is_error or '"status": 200' not in health.content[0].text:
-                    print(f"Sandbox API is not reachable at {api_url}", file=sys.stderr)
-                    return 1
-                print("Dry run OK: MCP server and sandbox API are reachable.")
-                return 0
+async def run_agent(
+    merchant: str,
+    api_url: str,
+    findings_dir: Path,
+    model: str = DEFAULT_MODEL,
+    max_iterations: int = 40,
+    on_tool_call=None,
+) -> AgentResult:
+    """Run the agent once for one merchant. Filed findings are written to findings_dir."""
+    started = time.monotonic()
+    user_prompt = f"Merchant to onboard: {merchant}. Test it and write the report."
+    trace: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user_prompt}]
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    tool_calls = 0
+
+    async with stdio_client(server_params(api_url, findings_dir)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            mcp_tools = (await session.list_tools()).tools
+            recorder = _RecordingSession(session, trace)
 
             client = AsyncAnthropic()
             runner = client.beta.messages.tool_runner(
@@ -78,48 +118,85 @@ async def run(merchant: str, model: str, api_url: str, max_iterations: int, out_
                 max_tokens=16000,
                 thinking={"type": "adaptive"},
                 output_config={"effort": "high"},
+                # The conversation grows every turn; cache the shared prefix.
+                cache_control={"type": "ephemeral"},
                 # If the model declines a request, the API retries it on a fallback model.
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
                 system=SYSTEM,
-                tools=[async_mcp_tool(t, mcp_client) for t in mcp_tools],
+                tools=[async_mcp_tool(t, recorder) for t in mcp_tools],
                 max_iterations=max_iterations,
-                messages=[{"role": "user", "content": f"Merchant to onboard: {merchant}. Test it and write the report."}],
+                messages=[{"role": "user", "content": user_prompt}],
             )
 
             last = None
-            tokens_in = tokens_out = 0
             async for message in runner:
                 last = message
-                tokens_in += message.usage.input_tokens
-                tokens_out += message.usage.output_tokens
+                for key in usage:
+                    usage[key] += getattr(message.usage, key, None) or 0
                 for block in message.content:
-                    if block.type == "tool_use":
-                        detail = block.input.get("path") or block.input.get("merchant_id") or ""
-                        print(f"  -> {block.name} {detail}".rstrip())
+                    if block.type == "text" and block.text.strip():
+                        trace.append({"role": "assistant", "content": block.text})
+                    elif block.type == "tool_use":
+                        tool_calls += 1
+                        trace.append({"role": "tool_call", "name": block.name,
+                                      "content": json.dumps(block.input, indent=2, ensure_ascii=False)})
+                        if on_tool_call:
+                            on_tool_call(block.name, block.input)
 
-            if last is None:
-                print("The model returned nothing.", file=sys.stderr)
+    if last is None:
+        raise RuntimeError("The model returned no message")
+    report = "\n".join(b.text for b in last.content if b.type == "text").strip()
+    return AgentResult(report=report, stop_reason=last.stop_reason, model=last.model, usage=usage,
+                       tool_calls=tool_calls, latency_s=round(time.monotonic() - started, 1), trace=trace)
+
+
+async def dry_run(api_url: str) -> int:
+    async with stdio_client(server_params(api_url, Path("reports/findings"))) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = (await session.list_tools()).tools
+            print(f"MCP tools: {', '.join(t.name for t in tools)}")
+            health = await session.call_tool("api_request", {"method": "GET", "path": "/health"})
+            if health.is_error or '"status": 200' not in health.content[0].text:
+                print(f"Sandbox API is not reachable at {api_url}", file=sys.stderr)
                 return 1
-            if last.stop_reason == "refusal":
-                print("The model declined this request.", file=sys.stderr)
-                return 1
-
-            report = "\n".join(b.text for b in last.content if b.type == "text").strip()
-            if last.stop_reason != "end_turn":
-                report += f"\n\n> Note: the run stopped early (stop_reason: {last.stop_reason}). The report may be incomplete."
-
-            out_dir.mkdir(parents=True, exist_ok=True)
-            path = out_dir / f"{merchant}-{datetime.now():%Y%m%d-%H%M%S}.md"
-            path.write_text(report + "\n")
-            print(f"\n{report}\n\nSaved to {path}")
-            print(f"Tokens: {tokens_in} in / {tokens_out} out, model: {last.model}")
-            return 0
+    print("Dry run OK: MCP server and sandbox API are reachable.")
+    return 0
 
 
-def _leaf(group: BaseExceptionGroup) -> BaseException:
+async def run_cli(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        return await dry_run(args.api_url)
+
+    stamp = f"{args.merchant}-{datetime.now():%Y%m%d-%H%M%S}"
+    findings_dir = (args.out / f"{stamp}-findings").resolve()
+
+    def show(name: str, tool_input: dict) -> None:
+        detail = tool_input.get("path") or tool_input.get("title") or tool_input.get("merchant_id") or ""
+        print(f"  -> {name} {detail}".rstrip())
+
+    result = await run_agent(args.merchant, args.api_url, findings_dir, args.model, args.max_iterations, show)
+    if result.stop_reason == "refusal":
+        print("The model declined this request.", file=sys.stderr)
+        return 1
+
+    report = result.report
+    if result.stop_reason != "end_turn":
+        report += f"\n\n> Note: the run stopped early (stop_reason: {result.stop_reason}). The report may be incomplete."
+    args.out.mkdir(parents=True, exist_ok=True)
+    path = args.out / f"{stamp}.md"
+    path.write_text(report + "\n")
+    filed = len(list(findings_dir.glob("finding_*.json"))) if findings_dir.exists() else 0
+    print(f"\n{report}\n\nReport: {path}\nFindings filed: {filed}" + (f" ({findings_dir})" if filed else ""))
+    print(f"Tokens: {result.usage['input_tokens']} in / {result.usage['output_tokens']} out, "
+          f"{result.tool_calls} tool calls, {result.latency_s}s, model: {result.model}")
+    return 0
+
+
+def leaf_exception(group: BaseException) -> BaseException:
     """First real exception inside a (possibly nested) exception group."""
-    exc: BaseException = group
+    exc = group
     while isinstance(exc, BaseExceptionGroup):
         exc = exc.exceptions[0]
     return exc
@@ -137,7 +214,7 @@ def main() -> None:
 
     code, error = 1, None
     try:
-        code = asyncio.run(run(args.merchant, args.model, args.api_url, args.max_iterations, args.out, args.dry_run))
+        code = asyncio.run(run_cli(args))
     # The MCP session runs in task groups, so API errors arrive wrapped in an ExceptionGroup.
     except* anthropic.AuthenticationError:
         error = "No valid Anthropic credentials. Set ANTHROPIC_API_KEY and try again."
@@ -146,15 +223,16 @@ def main() -> None:
     except* anthropic.APIConnectionError:
         error = "Could not reach the Anthropic API. Check your network."
     except* anthropic.APIStatusError as group:
-        error = f"Anthropic API error: {_leaf(group)}"
+        error = f"Anthropic API error: {leaf_exception(group)}"
     except* anthropic.AnthropicError as group:
-        error = f"Anthropic client error: {_leaf(group)}"
+        error = f"Anthropic client error: {leaf_exception(group)}"
     except* TypeError as group:
         # The SDK raises TypeError when no credentials can be found at all.
-        if "authentication" not in str(_leaf(group)):
+        if "authentication" not in str(leaf_exception(group)):
             raise
         error = "No Anthropic credentials found. Set ANTHROPIC_API_KEY and try again."
     sys.exit(error or code)
+
 
 if __name__ == "__main__":
     main()
