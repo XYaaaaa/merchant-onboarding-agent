@@ -46,12 +46,13 @@ Every error response has the shape `{"error": {"code": "...", "message": "..."}}
   `authorized -> voided` (void), `captured -> partially_refunded -> refunded`
   (refunds). Any other transition: `409 invalid_state`.
 - **R7 Capture** - optional `amount`, default is the full authorized amount.
-  `1 <= amount <= authorized amount`, else `422 capture_exceeds_authorized`.
-  A payment can be captured once.
+  An amount above the authorized amount: `422 capture_exceeds_authorized`.
+  Non-positive amounts: `422 invalid_request`. A payment can be captured once.
 - **R8 Refunds** - only if the merchant has `refund_allowed: true`
   (else `403 refund_not_allowed`), only on `captured` / `partially_refunded`
   payments, and the sum of all refunds must never exceed the captured amount
-  (else `422 refund_exceeds_captured`).
+  (else `422 refund_exceeds_captured`). Non-positive amounts: `422 invalid_request`.
+  The `refund_allowed` check comes first, before the payment's state is looked at.
 - **R9 Isolation** - a merchant can only see and act on its own payments.
   Anything else: `404 payment_not_found`.
 - **R10 Webhooks** - `payment.captured`, `payment.voided` and `refund.succeeded`

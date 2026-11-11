@@ -47,6 +47,8 @@ def scripted_deepseek(seen: list):
         assistants = [m for m in body["messages"] if m["role"] == "assistant"]
         if any("reasoning_content" not in m for m in assistants):
             return JSONResponse(status_code=400, content={"error": {"message": "reasoning_content missing"}})
+        if body.get("tool_choice") == "none":
+            return reply(content="Verdict: NOT READY\n\nRan out of turns; R2-R10 not tested.", reasoning="Wrap up.")
         step = len(assistants)
         if step == 0:
             return reply(tool=("get_merchant_config", {"merchant_id": "nova_telecom"}), reasoning="Check config.")
@@ -106,3 +108,17 @@ def test_full_case_through_deepseek_backend(fake_deepseek, tmp_path):
     # The finding was accepted by the MCP server and holds up under replay.
     assert len(findings) == 1 and meta["found"] == ["B08"]
     assert grade == {"case_pass": 1.0, "recall": 1.0, "false_pos": 0.0, "verdict_ok": 1.0}
+
+
+def test_out_of_turns_still_produces_a_report(fake_deepseek, tmp_path):
+    result = asyncio.run(_one_turn_short(tmp_path))
+    assert result.stop_reason == "max_iterations"
+    assert run_eval.read_verdict(result.report) == "NOT READY"
+    final_request = fake_deepseek[-1]
+    assert final_request["tool_choice"] == "none"
+    assert "out of turns" in final_request["messages"][-1]["content"]
+
+
+async def _one_turn_short(tmp_path):
+    async with run_eval.Sandbox(["B08"]) as sandbox:
+        return await agent_run.run_agent("nova_telecom", sandbox.url, tmp_path, max_iterations=2)

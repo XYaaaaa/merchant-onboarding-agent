@@ -359,7 +359,7 @@ def main() -> None:
     parser.add_argument("--cases", nargs="*", help="Only these case ids")
     parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--timeout-s", type=int, default=1500, help="Wall-clock ceiling per case")
-    parser.add_argument("--max-iterations", type=int, default=40)
+    parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--agent", default="claude", choices=["claude", "oracle", "null", "noisy"],
                         help="Stubs (oracle/null/noisy) exercise the harness without the model")
     parser.add_argument("--yes", action="store_true", help="Confirm a run that calls the model")

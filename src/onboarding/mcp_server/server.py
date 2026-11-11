@@ -13,6 +13,7 @@ Run: python -m onboarding.mcp_server.server   (stdio transport)
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -31,6 +32,9 @@ MAX_OUTPUT_CHARS = 12_000
 FINDINGS_DIR = Path(os.environ.get("FINDINGS_DIR", "reports/findings"))
 
 mcp = MCPServer("payment-sandbox")
+
+# Keep the terminal readable: one log line per sandbox request is noise.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @mcp.tool()

@@ -57,15 +57,21 @@ merchant's configuration (get_merchant_config) decides how those rules apply to 
 Other merchants exist on the same sandbox; use them where a rule is about isolation between merchants.
 
 How to work:
-- Write pytest tests that cover every rule from this merchant's point of view, including edge \
-values (limits, replays, wrong states), and run them with run_pytest.
-- A failing test is only a lead. Before reporting it, reproduce it with api_request and decide \
-whether the API broke a rule or your test was wrong. Fix wrong tests and rerun.
+- Get coverage from pytest, not from one request at a time: write a test file that covers every \
+rule from this merchant's point of view, including edge values (limits, replays, wrong states), and \
+run it with run_pytest. One file can check dozens of things in a single turn.
+- A failing test is only a lead. Use api_request to look closer at failures, then decide whether \
+the API broke a rule or your test was wrong. Fix wrong tests and rerun.
+- Before filing, read the rule again word for word. A response that differs from what you expected \
+but matches the rule's text is not a defect.
 - The sandbox keeps state between runs, so use fresh idempotency keys each time.
 - File every confirmed defect with submit_finding, one defect per finding. Its regression test is \
 what the platform team will run to verify the fix, and it is re-run on a fresh sandbox, so it must \
 pass on a correct API and fail only because of that defect. A defect that is not filed does not count.
 - Only report a defect you have reproduced. If a rule could not be tested, say so.
+
+You have a limited number of turns, stated in the task. Budget them: the report matters more than \
+one more probe, so stop testing while you still have turns left to write it.
 
 Finish with a Markdown report for the merchant's go-live review. Start it with a line that is \
 exactly "Verdict: READY" or "Verdict: NOT READY", then:
@@ -118,7 +124,7 @@ async def run_agent(
     api_url: str,
     findings_dir: Path,
     model: str | None = None,
-    max_iterations: int = 40,
+    max_iterations: int = 50,
     on_tool_call=None,
     provider: str | None = None,
 ) -> AgentResult:
@@ -128,7 +134,8 @@ async def run_agent(
     if provider == "deepseek" and not os.environ.get("DEEPSEEK_API_KEY"):
         raise MissingCredentials("DEEPSEEK_API_KEY is not set.")
     model = model or default_model(provider)
-    user_prompt = f"Merchant to onboard: {merchant}. Test it and write the report."
+    user_prompt = (f"Merchant to onboard: {merchant}. Test it and write the report. "
+                   f"You have at most {max_iterations} turns; a turn may contain several tool calls.")
     trace: list[dict] = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user_prompt}]
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
 
@@ -206,7 +213,7 @@ def main() -> None:
                         help="Default: deepseek if DEEPSEEK_API_KEY is set, else anthropic")
     parser.add_argument("--model", help="Default: the provider's default model")
     parser.add_argument("--api-url", default=os.environ.get("PAYMENT_API_URL", "http://127.0.0.1:8000"))
-    parser.add_argument("--max-iterations", type=int, default=40)
+    parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--out", type=Path, default=Path("reports"))
     parser.add_argument("--dry-run", action="store_true", help="Check the MCP wiring without calling the model")
     args = parser.parse_args()

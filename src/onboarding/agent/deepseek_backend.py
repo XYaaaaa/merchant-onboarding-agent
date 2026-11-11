@@ -9,6 +9,10 @@ from openai import AsyncOpenAI
 DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
 BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
+WRAP_UP = ("You are out of turns. Do not call any more tools. Write the final report now, starting with "
+           "the Verdict line, using only what you have already confirmed. List anything you did not get to "
+           "as not tested.")
+
 STOP_REASONS = {"stop": "end_turn", "length": "max_tokens", "content_filter": "refusal"}
 
 
@@ -24,8 +28,13 @@ async def drive(*, model, system, user_prompt, mcp_tools, session, max_iteration
     messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}]
     report, stop_reason, served_model, tool_calls = "", "max_iterations", model, 0
 
-    for _ in range(max_iterations):
-        response = await client.chat.completions.create(model=model, messages=messages, tools=tools, max_tokens=16000)
+    for turn_number in range(1, max_iterations + 1):
+        last_turn = turn_number == max_iterations
+        if last_turn:
+            messages.append({"role": "user", "content": WRAP_UP})
+        response = await client.chat.completions.create(
+            model=model, messages=messages, tools=tools, max_tokens=16000,
+            **({"tool_choice": "none"} if last_turn else {}))
         choice, served_model = response.choices[0], response.model
         message = choice.message
         if response.usage:
@@ -46,9 +55,10 @@ async def drive(*, model, system, user_prompt, mcp_tools, session, max_iteration
         if (message.content or "").strip():
             trace.append({"role": "assistant", "content": message.content})
 
-        if not message.tool_calls:
+        if last_turn or not message.tool_calls:
             report = (message.content or "").strip()
-            stop_reason = STOP_REASONS.get(choice.finish_reason, choice.finish_reason)
+            # Out of turns is worth knowing even when the forced report came back fine.
+            stop_reason = "max_iterations" if last_turn else STOP_REASONS.get(choice.finish_reason, choice.finish_reason)
             break
 
         for call in message.tool_calls:

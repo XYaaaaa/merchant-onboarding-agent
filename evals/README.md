@@ -1,6 +1,6 @@
 # Eval: does the agent find the seeded bugs?
 
-**Status: harness built and self-tested. No model run yet, so there is no score to report.**
+**Status: harness built and self-tested. One pilot case has been run (below); the full 15-case baseline has not.**
 
 ## What is measured
 
@@ -87,6 +87,20 @@ Useful flags: `--reps 3` (stability), `--provider`, `--model`, `--concurrency`, 
 Results land in `evals/runs/<variant>/`: `results.jsonl` (one row per case run),
 `traces/` (full transcripts), `errors.jsonl` (runs that failed to execute; these are
 never scored as agent failures). A stopped run resumes where it left off.
+
+## Pilot run: what one case taught us
+
+One case (`single-B08`, DeepSeek `deepseek-v4-pro`), kept in `runs/pilot-1-before-fixes/`.
+It is a single run, so it says nothing about the agent's overall accuracy. It did show three problems:
+
+| What happened | Cause | Fix |
+|---|---|---|
+| No report: the agent hit its 40-turn limit | It probed one request at a time (53 `api_request` calls, 1 `run_pytest`) | Prompt now says to get coverage from pytest and states the turn budget; the last turn is reserved for the report |
+| 1 "false positive": capture with amount 0 returns `invalid_request` | **The spec was unclear, not the agent.** R7 did not say what a non-positive amount returns | Spec fixed (R7, R8), and the reference checks now cover it |
+| The seeded bug was filed twice, as two symptoms | Both findings are valid under replay | None; duplicates are not penalized |
+
+It found the seeded bug (refunds going through for a merchant with refunds disabled).
+Cost of that one case: 638k input tokens (623k of them cache hits), 21k output, 4.1 minutes.
 
 ## Limits worth knowing
 

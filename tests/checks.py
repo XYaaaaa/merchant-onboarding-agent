@@ -93,6 +93,7 @@ def r6_state_machine(c):
 def r7_capture_amount(c):
     pid = create(c, amount=1000).json()["id"]
     expect(c.post(f"/v1/payments/{pid}/capture", json={"amount": 1001}, headers=h(ACME)), 422, "capture_exceeds_authorized")
+    expect(c.post(f"/v1/payments/{pid}/capture", json={"amount": 0}, headers=h(ACME)), 422, "invalid_request")
     partial = expect(c.post(f"/v1/payments/{pid}/capture", json={"amount": 400}, headers=h(ACME)), 200).json()
     assert partial["status"] == "captured" and partial["captured_amount"] == 400
 
@@ -100,6 +101,7 @@ def r7_capture_amount(c):
 def r8_refund_total(c):
     pid = captured(c, amount=1000)
     url = f"/v1/payments/{pid}/refunds"
+    expect(c.post(url, json={"amount": 0}, headers=h(ACME)), 422, "invalid_request")
     expect(c.post(url, json={"amount": 600}, headers=h(ACME)), 201)
     assert c.get(f"/v1/payments/{pid}", headers=h(ACME)).json()["status"] == "partially_refunded"
     expect(c.post(url, json={"amount": 600}, headers=h(ACME)), 422, "refund_exceeds_captured")
@@ -111,6 +113,8 @@ def r8_refund_total(c):
 def r8_refund_flag(c):
     pid = captured(c, NOVA)
     expect(c.post(f"/v1/payments/{pid}/refunds", json={"amount": 100}, headers=h(NOVA)), 403, "refund_not_allowed")
+    fresh = create(c, NOVA).json()["id"]  # flag is checked before state
+    expect(c.post(f"/v1/payments/{fresh}/refunds", json={"amount": 100}, headers=h(NOVA)), 403, "refund_not_allowed")
 
 
 def r9_isolation(c):
