@@ -9,7 +9,7 @@ works; it says nothing about its overall accuracy. It ran **before** the fixes i
 |---|---|
 | Case | `single-B08`: merchant `nova_telecom`, seeded bug **B08** (refunds go through although the merchant has `refund_allowed: false`) |
 | Model | DeepSeek `deepseek-v4-pro` |
-| Turn limit | 40 |
+| Turn limit | 40 (raised to 50 after this run) |
 | Cost | 638k input tokens (623k cache hits), 21k output tokens, 4.1 minutes |
 | Raw data | [results.jsonl](../evals/runs/pilot-1-before-fixes/results.jsonl) (the grade), [full transcript](../evals/runs/pilot-1-before-fixes/traces/single-B08_rep0.json) (all 62 tool calls and results) |
 

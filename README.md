@@ -1,13 +1,52 @@
 # Merchant Onboarding Agent
 
 An agent that helps a payment platform's forward deployed engineer (FDE) get a new merchant
-safely to go-live. Claude reads the payment API's spec, writes integration tests for the
-merchant's configuration, runs them, investigates failures, and writes a readiness report.
+safely to go-live. An LLM (Claude or DeepSeek) reads the payment API's spec, writes integration
+tests for the merchant's configuration, runs them, investigates failures, files each defect with
+a regression test, and writes a readiness report.
 
-**中文简介：** 一个帮支付平台 FDE 完成新商户接入的 Agent。Claude 读取支付 API 规范，针对商户配置生成并运行集成测试，排查失败原因，最后输出《上线就绪报告》。Agent 只能通过 MCP server 访问沙箱。
+**中文简介：** 一个帮支付平台 FDE 完成新商户接入的 Agent。大模型（Claude 或 DeepSeek）读取支付 API 规范，针对商户配置生成并运行集成测试，排查失败原因，为每个缺陷提交回归测试，最后输出《上线就绪报告》。Agent 只能通过 MCP server 访问沙箱。
+
+## Results so far
+
+**One pilot case has been run on a real model. The full 15-case eval has not**, so there is no
+overall accuracy number yet.
+
+| Pilot case | Result |
+|---|---|
+| Setup | Merchant `nova_telecom` (refunds disabled), seeded bug: refunds still go through. DeepSeek `deepseek-v4-pro` |
+| Seeded bug | **Found**, on its own, at tool call 38 of 62 |
+| Findings filed | 3: 2 valid (two symptoms of the bug), 1 false positive, which turned out to be **a real gap in the spec** |
+| Readiness report | Not written: the agent ran out of turns (fixed since; see below) |
+| Cost and time | 4.1 minutes; 638k input tokens (98% cache hits), 21k output; about ¥0.4 |
+
+What the agent filed (reformatted to fit; the original, with its `api()` helper, is in the
+[transcript](evals/runs/pilot-1-before-fixes/traces/single-B08_rep0.json)). The grader re-ran this
+test on a clean build (it passes) and on the buggy build (it fails), so the finding counts:
+
+```python
+# Finding: nova_telecom has refund_allowed=false but refund on a captured payment succeeds  (rule R8)
+def test_nova_refund_not_allowed_on_captured_payment():
+    body = {"amount": 10000, "currency": "USD", "payment_method": "card",
+            "payer_ref": "payer-" + uuid.uuid4().hex[:10]}
+    r = api("POST", "/v1/payments", "nova_telecom", body, str(uuid.uuid4()))
+    assert r.status_code == 201, r.text
+    payment_id = r.json()["id"]
+
+    r = api("POST", f"/v1/payments/{payment_id}/capture", "nova_telecom")
+    assert r.status_code == 200, r.text
+
+    r = api("POST", f"/v1/payments/{payment_id}/refunds", "nova_telecom", {"amount": 100})
+    assert r.status_code == 403, r.text
+    assert r.json()["error"]["code"] == "refund_not_allowed", r.text
+```
+
+The run exposed three problems, all fixed: the agent spent its turns on single requests
+instead of batch tests, the spec did not say what a zero amount should return, and the final
+turn was not reserved for the report. Full walkthrough: [docs/example-run.md](docs/example-run.md).
 
 > Why this exists: see the [customer scenario](docs/scenario.md).
-> What a run looks like: see the [example run on DeepSeek](docs/example-run.md).
+> Why it is built this way: see the [design decisions](docs/design-decisions.md).
 
 ## Status
 
@@ -17,7 +56,7 @@ merchant's configuration, runs them, investigates failures, and writes a readine
 | 10 seeded bugs, each switchable | Done, tested |
 | MCP server (6 tools) | Done, tested end to end over stdio |
 | Test agent (Claude or DeepSeek) | Working. One real run on DeepSeek: found the seeded bug; [see the example run](docs/example-run.md) |
-| Docker Compose | Written, **not yet verified** |
+| Docker Compose | Written and reviewed, **not yet run** (no Docker on the machine it was built on) |
 | Eval harness (recall / false positives) | [Built and self-tested](evals/README.md). One pilot case run; **full 15-case baseline not run yet** |
 
 ## Architecture
@@ -60,7 +99,7 @@ Needs Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-uv run pytest                    # 32 tests
+uv run pytest                    # 33 tests
 ```
 
 Start the sandbox (interactive docs at http://127.0.0.1:8000/docs):

@@ -34,9 +34,10 @@ lowering the bar for go-live.
 ## Constraints
 
 - **The agent never touches production.** It works only in the sandbox, through an MCP
-  server that exposes five tools.
+  server that exposes six tools.
 - **No real payment data.** Payers are opaque tokens; all secrets are sandbox fakes.
-- **Generated code runs in a container**, without the model API key.
+- **Generated code is contained.** Tests run in a throwaway directory with a time limit and
+  without the model API key; with Docker, they also run inside a container.
 - **A human makes the go-live decision.** The agent writes the report; the FDE signs off.
 
 ## Stakeholders
